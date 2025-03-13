@@ -188,202 +188,238 @@ def import_indicateurs_commune(connection, code_insee, nom_commune=None):
         print(f"Aucune donnée disponible pour la commune {code_insee}")
         return
     
-    # Conversion en DataFrame
-    indicateurs = pd.DataFrame.from_dict(response["results"])
-    
-    if indicateurs.empty:
-        print(f"Aucun indicateur trouvé pour la commune {code_insee}")
-        return
-    
+    cursor = None
     try:
+        # Conversion en DataFrame
+        indicateurs = pd.DataFrame.from_dict(response["results"])
+        
+        if indicateurs.empty:
+            print(f"Aucun indicateur trouvé pour la commune {code_insee}")
+            return
+        
+        # Afficher les colonnes disponibles pour le débogage
+        print("Colonnes disponibles dans les données:", indicateurs.columns.tolist())
+        
+        # Mapping des noms de colonnes
+        column_mapping = {
+            'nb_ventes_maison': 'nbtrans_cod111',
+            'nb_ventes_appartement': 'nbtrans_cod121',
+            'prix_median_maison': 'prix_median_cod111',
+            'prix_median_appartement': 'prix_median_cod121',
+            'surface_median_maison': 'surface_median_cod111',
+            'surface_median_appartement': 'surface_median_cod121',
+            'prix_m2_median_maison': 'prix_m2_median_cod111',
+            'prix_m2_median_appartement': 'prix_m2_median_cod121'
+        }
+        
+        # Renommer les colonnes si elles existent
+        for old_col, new_col in column_mapping.items():
+            if old_col in indicateurs.columns:
+                indicateurs[new_col] = indicateurs[old_col]
+        
+        # Remplir les valeurs manquantes par 0
+        for col in column_mapping.values():
+            if col not in indicateurs.columns:
+                indicateurs[col] = 0
+            else:
+                indicateurs[col] = indicateurs[col].fillna(0)
+        
+        # Convertir les types de données
+        numeric_columns = list(column_mapping.values())
+        for col in numeric_columns:
+            indicateurs[col] = pd.to_numeric(indicateurs[col], errors='coerce').fillna(0)
+        
+        # Supprimer les doublons potentiels
+        indicateurs = indicateurs.drop_duplicates(subset=['annee'], keep='last')
+        
         cursor = connection.cursor()
         
         # Insertion des données
         for _, row in indicateurs.iterrows():
-            query = '''
-            INSERT INTO dv3f_indicateurs_commune 
-            (code_insee, nom_commune, annee, nbtrans_cod111, nbtrans_cod121, 
-            prix_median_cod111, prix_median_cod121, surface_median_cod111, surface_median_cod121,
-            prix_m2_median_cod111, prix_m2_median_cod121)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-            ON DUPLICATE KEY UPDATE
-            nom_commune = VALUES(nom_commune),
-            nbtrans_cod111 = VALUES(nbtrans_cod111),
-            nbtrans_cod121 = VALUES(nbtrans_cod121),
-            prix_median_cod111 = VALUES(prix_median_cod111),
-            prix_median_cod121 = VALUES(prix_median_cod121),
-            surface_median_cod111 = VALUES(surface_median_cod111),
-            surface_median_cod121 = VALUES(surface_median_cod121),
-            prix_m2_median_cod111 = VALUES(prix_m2_median_cod111),
-            prix_m2_median_cod121 = VALUES(prix_m2_median_cod121),
-            date_import = CURRENT_TIMESTAMP
-            '''
-            
-            data = (
-                code_insee,
-                nom_commune,
-                row.get('annee'),
-                row.get('nbtrans_cod111'),
-                row.get('nbtrans_cod121'),
-                row.get('prixmed_cod111'),
-                row.get('prixmed_cod121'),
-                row.get('surfmed_cod111'),
-                row.get('surfmed_cod121'),
-                row.get('prixm2med_cod111'),
-                row.get('prixm2med_cod121')
-            )
-            
-            cursor.execute(query, data)
+            try:
+                query = '''
+                INSERT INTO dv3f_indicateurs_commune 
+                (code_insee, nom_commune, annee, nbtrans_cod111, nbtrans_cod121, 
+                prix_median_cod111, prix_median_cod121, surface_median_cod111, surface_median_cod121,
+                prix_m2_median_cod111, prix_m2_median_cod121)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                ON DUPLICATE KEY UPDATE
+                nom_commune = VALUES(nom_commune),
+                nbtrans_cod111 = VALUES(nbtrans_cod111),
+                nbtrans_cod121 = VALUES(nbtrans_cod121),
+                prix_median_cod111 = VALUES(prix_median_cod111),
+                prix_median_cod121 = VALUES(prix_median_cod121),
+                surface_median_cod111 = VALUES(surface_median_cod111),
+                surface_median_cod121 = VALUES(surface_median_cod121),
+                prix_m2_median_cod111 = VALUES(prix_m2_median_cod111),
+                prix_m2_median_cod121 = VALUES(prix_m2_median_cod121),
+                date_import = CURRENT_TIMESTAMP
+                '''
+                
+                data = (
+                    code_insee,
+                    nom_commune,
+                    str(row['annee']),
+                    int(row['nbtrans_cod111']),
+                    int(row['nbtrans_cod121']),
+                    float(row['prix_median_cod111']),
+                    float(row['prix_median_cod121']),
+                    float(row['surface_median_cod111']),
+                    float(row['surface_median_cod121']),
+                    float(row['prix_m2_median_cod111']),
+                    float(row['prix_m2_median_cod121'])
+                )
+                
+                cursor.execute(query, data)
+                print(f"Insertion réussie pour l'année {row['annee']}")
+                
+            except Exception as e:
+                print(f"Erreur lors de l'insertion pour l'année {row['annee']}: {e}")
+                continue
         
         connection.commit()
         print(f"Importation réussie: {len(indicateurs)} indicateurs pour la commune {code_insee}")
         
-    except Error as e:
-        print(f"Erreur lors de l'insertion des indicateurs: {e}")
+    except Exception as e:
+        print(f"Erreur lors du traitement des données: {e}")
+        if cursor:
+            connection.rollback()
     finally:
         if cursor:
             cursor.close()
 
 def import_mutations_geoloc(connection, bbox=None, code_insee=None, max_retries=3):
     """
-    Récupère les mutations géolocalisées et les sauvegarde dans MySQL.
-    
-    Args:
-        connection: Connexion MySQL active
-        bbox (tuple, optional): Bounding box (x1, y1, x2, y2)
-        code_insee (str, optional): Code INSEE de la commune
+    Récupère et sauvegarde les mutations géolocalisées dans la base de données
     """
-    if not bbox and not code_insee:
-        print("Erreur: Vous devez spécifier soit une bbox, soit un code INSEE")
-        return
-    
-    # Construction de l'URL
+    # Construction de l'URL en fonction des paramètres
     if bbox:
         x1, y1, x2, y2 = bbox
         url = f"{BASE_URL_API}/dvf_opendata/geomutations/?in_bbox={x1},{y1},{x2},{y2}&page_size=1000"
-        print(f"Récupération des mutations géolocalisées dans la zone: ({x1}, {y1}) - ({x2}, {y2})")
-    else:
+        print(f"Récupération des mutations géolocalisées pour la bbox: {x1},{y1},{x2},{y2}")
+    elif code_insee:
         url = f"{BASE_URL_API}/dvf_opendata/geomutations/?code_insee={code_insee}&page_size=1000"
         print(f"Récupération des mutations géolocalisées pour la commune: {code_insee}")
-    
-    # Compteurs
-    total_mutations = 0
-    total_pages = 0
+    else:
+        print("Erreur: Vous devez spécifier soit une bbox, soit un code_insee")
+        return
     
     try:
         cursor = connection.cursor()
+        total_mutations = 0
+        total_pages = 0
         
-        # Boucle sur toutes les pages de résultats
         while url:
             total_pages += 1
             print(f"Traitement de la page {total_pages}...")
             
-            # Appel à l'API avec mécanisme de reprise
+            # Implémentation de retry avec backoff exponentiel
             response = None
             retries = 0
             while response is None and retries < max_retries:
                 if retries > 0:
                     print(f"Tentative {retries+1}/{max_retries}...")
-                    time.sleep(5 * retries)  # Attente croissante entre les tentatives
-
-                response = apidf(url, timeout=60)  # Timeout plus long pour les mutations
+                    time.sleep(5 * retries)  # Backoff exponentiel
+                
+                try:
+                    response = apidf(url, timeout=60)
+                except Exception as e:
+                    print(f"Erreur lors de la requête: {e}")
+                    retries += 1
+                    continue
+                
                 retries += 1
             
             if not response or "features" not in response:
                 print("Aucune donnée disponible ou format de réponse inattendu")
                 break
-
-            # Vérifier les IDs de mutation en double
-            mutation_ids = set()
-            duplicate_ids = set()
-
-            for feature in response["features"]:
-                if "properties" in feature:
-                    mutation_id = feature["properties"].get("idmutation", "")
-                    if mutation_id in mutation_ids:
-                        duplicate_ids.add(mutation_id)
-                    else:
-                        mutation_ids.add(mutation_id)
-
-            if duplicate_ids:
-                print(f"Attention: {len(duplicate_ids)} ID de mutation en double détectés")
             
-            # Traitement des mutations
+            # Traitement des mutations par lots
+            mutations_batch = []
             for feature in response["features"]:
                 if "properties" in feature and "geometry" in feature:
                     props = feature["properties"]
                     geom = feature["geometry"]
                     
-                    # Extraction des coordonnées
+                    # Extraction et validation des coordonnées
                     longitude, latitude = None, None
                     if geom["type"] == "Point" and len(geom["coordinates"]) >= 2:
                         longitude, latitude = geom["coordinates"]
                     
-                    # Préparation des données
-                    mutation_id = props.get("idmutation", "")
-                    code_insee_mut = props.get("codinsee", "")
-                    commune = props.get("libcom", "")
-                    date_mut = props.get("datemut", None)
-                    lib_type_bien = props.get("libtypbien", "")
-                    valeur_fonc = props.get("valeurfonc", None)
-                    sbati = props.get("sbati", None)
-                    sterr = props.get("sterr", None)
+                    # Nettoyage et validation des données
+                    mutation_data = {
+                        "id_mutation": props.get("idmutation", ""),
+                        "code_insee": props.get("codinsee", ""),
+                        "commune": props.get("libcom", ""),
+                        "date_mut": props.get("datemut"),
+                        "type_bien": props.get("libtypbien", ""),
+                        "valeur": float(props.get("valeurfonc", 0) or 0),
+                        "surface_batie": float(props.get("sbati", 0) or 0),
+                        "surface_terrain": float(props.get("sterr", 0) or 0),
+                        "latitude": latitude,
+                        "longitude": longitude
+                    }
                     
-                    # Insertion dans la base de données
-                    query = '''
-                    INSERT INTO dv3f_mutations 
-                    (id_mutation, code_insee, commune, datemut, libtypbien, valeurfonc, sbati, sterr, latitude, longitude)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-                    ON DUPLICATE KEY UPDATE
-                    code_insee = VALUES(code_insee),
-                    commune = VALUES(commune),
-                    datemut = VALUES(datemut),
-                    libtypbien = VALUES(libtypbien),
-                    valeurfonc = VALUES(valeurfonc),
-                    sbati = VALUES(sbati),
-                    sterr = VALUES(sterr),
-                    latitude = VALUES(latitude),
-                    longitude = VALUES(longitude),
-                    date_import = CURRENT_TIMESTAMP
-                    '''
+                    # Validation des données obligatoires
+                    if mutation_data["id_mutation"] and mutation_data["code_insee"]:
+                        mutations_batch.append(mutation_data)
+            
+            # Insertion par lots
+            if mutations_batch:
+                query = '''
+                INSERT INTO dv3f_mutations 
+                (id_mutation, code_insee, commune, datemut, libtypbien, valeurfonc, 
+                sbati, sterr, latitude, longitude)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                ON DUPLICATE KEY UPDATE
+                code_insee = VALUES(code_insee),
+                commune = VALUES(commune),
+                datemut = VALUES(datemut),
+                libtypbien = VALUES(libtypbien),
+                valeurfonc = VALUES(valeurfonc),
+                sbati = VALUES(sbati),
+                sterr = VALUES(sterr),
+                latitude = VALUES(latitude),
+                longitude = VALUES(longitude),
+                date_import = CURRENT_TIMESTAMP
+                '''
+                
+                values = [(
+                    m["id_mutation"],
+                    m["code_insee"],
+                    m["commune"],
+                    m["date_mut"],
+                    m["type_bien"],
+                    m["valeur"],
+                    m["surface_batie"],
+                    m["surface_terrain"],
+                    m["latitude"],
+                    m["longitude"]
+                ) for m in mutations_batch]
+                
+                try:
+                    cursor.executemany(query, values)
+                    connection.commit()
                     
-                    data = (
-                        mutation_id,
-                        code_insee_mut,
-                        commune,
-                        date_mut,
-                        lib_type_bien,
-                        valeur_fonc,
-                        sbati,
-                        sterr,
-                        latitude,
-                        longitude
-                    )
-                    
-                    cursor.execute(query, data)
-                    total_mutations += 1
-                    
-                    # Commit par lots
-                    if total_mutations % 100 == 0:
-                        connection.commit()
-                        print(f"  {total_mutations} mutations traitées...")
+                    total_mutations += len(mutations_batch)
+                    print(f"  {total_mutations} mutations traitées...")
+                except Exception as e:
+                    print(f"Erreur lors de l'insertion des données: {e}")
+                    connection.rollback()
             
             # Passage à la page suivante
-            if not response.get("next"):
-                break
-            
-            url = response["next"]
-            
-            # Pause pour éviter de surcharger l'API
-            time.sleep(2)
+            url = response.get("next")
+            if url:
+                time.sleep(2)  # Pause entre les pages pour éviter de surcharger l'API
         
-        connection.commit()
         print(f"Importation réussie: {total_mutations} mutations sur {total_pages} pages")
         
-    except Error as e:
+    except Exception as e:
         print(f"Erreur lors de l'insertion des mutations: {e}")
+        if connection.is_connected():
+            connection.rollback()
     finally:
-        if cursor:
+        if 'cursor' in locals() and cursor:
             cursor.close()
 
 #############################################################################

@@ -1,4 +1,3 @@
-
 import pandas as pd
 import numpy as np
 import mysql.connector
@@ -204,7 +203,51 @@ def clean_siret(siret_str):
     
     return None
 
-# Prétraitement des données d'annonces
+def extract_location_from_url(url):
+    """
+    Extrait le code postal et la ville à partir de l'URL de l'annonce.
+    Exemples d'URL:
+    - https://www.fnaim.fr/annonce-immobiliere/52367367/4333-acheter-appartement-rennes-35000.htm
+    - https://www.fnaim.fr/annonce-immobiliere/52203849/4333-acheter-appartement-ille-et-vilaine-35.htm
+    """
+    if not url or not isinstance(url, str):
+        return None, None, None
+    
+    # Pattern pour extraire le code postal à la fin de l'URL (ex: rennes-35000.htm)
+    cp_pattern = r'[-/](\d{5})\.htm$'
+    cp_match = re.search(cp_pattern, url)
+    
+    if cp_match:
+        # Cas simple: code postal à 5 chiffres trouvé à la fin
+        code_postal = cp_match.group(1)
+        departement = code_postal[:2]
+        
+        # Extraction de la ville
+        ville_pattern = r'[-/]([a-zA-Z-]+)-\d{5}\.htm$'
+        ville_match = re.search(ville_pattern, url)
+        ville = ville_match.group(1).replace('-', ' ').title() if ville_match else None
+        
+        return code_postal, departement, ville
+    else:
+        # Cas plus complexe: chercher un département à 2 chiffres à la fin (ex: ille-et-vilaine-35.htm)
+        dept_pattern = r'[-/](\d{1,2})\.htm$'
+        dept_match = re.search(dept_pattern, url)
+        
+        if dept_match:
+            departement = dept_match.group(1)
+            # Pas de code postal précis, on utilise le département suivi de 000
+            code_postal = f"{departement.zfill(2)}000"
+            
+            # Extraction de la région/ville (si présente)
+            region_pattern = r'[-/]([a-zA-Z-]+)-\d{1,2}\.htm$'
+            region_match = re.search(region_pattern, url)
+            ville = region_match.group(1).replace('-', ' ').title() if region_match else None
+            
+            return code_postal, departement, ville
+    
+    # Si aucun pattern ne correspond
+    return None, None, None
+
 def preprocess_annonces_dataframe(df):
     """Prétraite le DataFrame d'annonces avant insertion dans les bases de données."""
     # Copie du DataFrame pour éviter de modifier l'original
@@ -223,9 +266,23 @@ def preprocess_annonces_dataframe(df):
     if 'nb_chambres' in processed_df.columns:
         processed_df['nb_chambres'] = processed_df['nb_chambres'].apply(clean_rooms)
     
-    if 'code_postal' in processed_df.columns:
-        processed_df['code_postal'] = processed_df['code_postal'].apply(clean_postal_code)
-        processed_df['departement'] = processed_df['code_postal'].apply(extract_department)
+    # Extraction du code postal et du département à partir de l'URL
+    if 'url' in processed_df.columns:
+        # Créer une fonction temporaire pour appliquer extract_location_from_url et obtenir les 3 valeurs
+        def extract_all_location(url):
+            cp, dept, ville = extract_location_from_url(url)
+            return pd.Series([cp, dept, ville])
+        
+        # Appliquer la fonction et assigner les résultats aux colonnes correspondantes
+        processed_df[['code_postal', 'departement', 'ville']] = processed_df['url'].apply(extract_all_location)
+        
+        # Backup: si code_postal est vide mais existe dans les données originales, le conserver
+        if 'code_postal' in df.columns:
+            mask = processed_df['code_postal'].isna() & df['code_postal'].notna()
+            processed_df.loc[mask, 'code_postal'] = df.loc[mask, 'code_postal']
+            
+            # Recalculer le département à partir du code postal de backup
+            processed_df.loc[mask, 'departement'] = processed_df.loc[mask, 'code_postal'].apply(extract_department)
     
     # Nettoyage des données DPE/GES
     if 'dpe_consumption' in processed_df.columns:
@@ -254,7 +311,7 @@ def preprocess_annonces_dataframe(df):
         processed_df[col] = processed_df[col].where(pd.notna(processed_df[col]), None)
     
     # Suppression des lignes sans informations essentielles
-    essential_columns = ['prix', 'surface', 'code_postal']
+    essential_columns = ['prix', 'surface']
     processed_df = processed_df.dropna(subset=essential_columns, how='all')
     
     return processed_df

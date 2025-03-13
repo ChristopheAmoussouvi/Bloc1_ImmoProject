@@ -50,5 +50,5 @@ Si vous avez des questions ou des suggestions, n'hésitez pas à me contacter.
 
 ## Utilisation
 
-- Pour démarrer le backend, lancez le serveur API (par exemple en exécutant `ap.py` ou via un gestionnaire de processus).
+- Pour démarrer le backend, lancez le serveur API (par exemple en exécutant `API_APP_V3.py` ou via un gestionnaire de processus).
 - L'interface web est accessible via le navigateur à l'adresse configurée.

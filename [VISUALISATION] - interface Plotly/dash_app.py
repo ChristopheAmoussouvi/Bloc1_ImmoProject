@@ -10,12 +10,137 @@ import numpy as np
 from datetime import datetime, date
 
 # Initialisation de l'application Dash avec un thème Bootstrap
-app = dash.Dash(__name__, external_stylesheets=[dbc.themes.BOOTSTRAP])
+app = dash.Dash(
+    __name__, 
+    external_stylesheets=[dbc.themes.BOOTSTRAP],
+    suppress_callback_exceptions=True  # Ajout de cette ligne pour supprimer les exceptions de callback
+)
 server = app.server
 app.title = "Estimateur Immobilier FNAIM"
 
-# URL de base de l'API - mettre à jour avec l'URL correcte
+# URL de base de l'API
 API_BASE_URL = "http://localhost:8000"
+
+# Fonction pour obtenir un token JWT
+def get_jwt_token(username="admin", password="admin123"):
+    """Obtient un token JWT pour l'authentification."""
+    try:
+        response = requests.post(
+            f"{API_BASE_URL}/token",
+            data={"username": username, "password": password}
+        )
+        if response.status_code == 200:
+            return response.json()["access_token"]
+        else:
+            print(f"Erreur d'authentification: {response.status_code}")
+            print(response.text)
+            return None
+    except Exception as e:
+        print(f"Erreur lors de la récupération du token: {e}")
+        return None
+
+# Fonction pour faire des requêtes API avec authentification
+def api_request(endpoint, params=None, method="GET"):
+    """Effectue une requête API avec token JWT."""
+    token = get_jwt_token()
+    if not token:
+        return None
+    
+    headers = {"Authorization": f"Bearer {token}"}
+    try:
+        if method == "GET":
+            response = requests.get(
+                f"{API_BASE_URL}{endpoint}",
+                params=params,
+                headers=headers
+            )
+        else:
+            response = requests.post(
+                f"{API_BASE_URL}{endpoint}",
+                json=params,
+                headers=headers
+            )
+        
+        if response.status_code == 200:
+            return response.json()
+        else:
+            print(f"Erreur API: {response.status_code}")
+            print(response.text)
+            return None
+    except Exception as e:
+        print(f"Erreur lors de la requête API: {e}")
+        return None
+
+# Fonction pour récupérer les données DV3F
+def get_dv3f_data(code_insee=None, type_bien=None):
+    """Récupère les données DV3F pour une commune."""
+    params = {}
+    if code_insee:
+        params["code_insee"] = code_insee
+    if type_bien:
+        params["type_bien"] = type_bien
+    
+    return api_request("/dv3f/indicateurs", params)
+
+def get_dv3f_evolution(code_insee, type_bien=None):
+    """Récupère l'évolution des prix DV3F."""
+    params = {"code_insee": code_insee}
+    if type_bien:
+        params["type_bien"] = type_bien
+    
+    return api_request("/dv3f/stats/evolution-prix", params)
+
+def get_dv3f_mutations(code_insee=None, commune=None, date_min=None, date_max=None):
+    """Récupère les mutations DV3F."""
+    params = {}
+    if code_insee:
+        params["code_insee"] = code_insee
+    if commune:
+        params["commune"] = commune
+    if date_min:
+        params["date_min"] = date_min
+    if date_max:
+        params["date_max"] = date_max
+    
+    return api_request("/dv3f/mutations", params)
+
+# Fonction pour créer la carte des mutations
+def create_map_mutations(mutations_data):
+    """Crée une carte des mutations immobilières."""
+    if not mutations_data:
+        return go.Figure()
+    
+    df = pd.DataFrame(mutations_data)
+    
+    fig = go.Figure(go.Scattermapbox(
+        lat=df["latitude"],
+        lon=df["longitude"],
+        mode="markers",
+        marker=go.scattermapbox.Marker(
+            size=10,
+            color=df["valeurfonc"],
+            colorscale="Viridis",
+            showscale=True,
+            colorbar=dict(title="Prix (€)")
+        ),
+        text=df.apply(lambda x: f"Prix: {x['valeurfonc']:,.0f}€<br>Surface: {x['sbati']}m²<br>Type: {x['libtypbien']}", axis=1),
+        hoverinfo="text"
+    ))
+    
+    # Centre la carte sur la moyenne des coordonnées
+    center_lat = df["latitude"].mean()
+    center_lon = df["longitude"].mean()
+    
+    fig.update_layout(
+        mapbox=dict(
+            style="open-street-map",
+            center=dict(lat=center_lat, lon=center_lon),
+            zoom=13
+        ),
+        margin=dict(r=0, t=0, l=0, b=0)
+    )
+    
+    return fig
 
 # Fonction pour récupérer les données depuis l'API
 def get_properties(filters=None):
@@ -130,17 +255,28 @@ app.layout = dbc.Container([
                 dbc.Tab(label="Tableau de bord", tab_id="dashboard"),
                 dbc.Tab(label="Recherche de biens", tab_id="search"),
                 dbc.Tab(label="Analyse du marché", tab_id="analysis"),
+                dbc.Tab(label="Données DV3F", tab_id="dv3f"),
                 dbc.Tab(label="Estimation de prix", tab_id="prediction"),
             ], id="tabs", active_tab="dashboard")
         ])
     ]),
     
-    # Conteneur de contenu qui sera mis à jour en fonction de l'onglet sélectionné
+    # Conteneur de contenu
     html.Div(id="tab-content", className="mt-4"),
+    
+    # Composants cachés pour les résultats
+    html.Div([
+        html.Div(id="search-results"),
+        html.Div(id="prediction-loading"),
+        html.Div(id="prediction-results"),
+        html.Div(id="dv3f-evolution-graph"),
+        html.Div(id="dv3f-mutations-map"),
+        html.Div(id="dv3f-stats"),
+    ], style={'display': 'none'}),  # Ces composants sont cachés mais disponibles pour les callbacks
     
 ], fluid=True)
 
-# Callback pour afficher différents contenus selon l'onglet sélectionné
+# Callback pour la navigation entre les onglets
 @app.callback(
     Output("tab-content", "children"),
     Input("tabs", "active_tab")
@@ -153,6 +289,8 @@ def render_tab_content(active_tab):
         return render_search()
     elif active_tab == "analysis":
         return render_analysis()
+    elif active_tab == "dv3f":
+        return render_dv3f()  # Nouvelle fonction séparée pour l'onglet DV3F
     elif active_tab == "prediction":
         return render_prediction()
     
@@ -380,96 +518,68 @@ def render_search():
     ])
 
 def render_analysis():
-    """Affiche l'onglet d'analyse"""
-    # Utiliser la fonction pour générer des données d'évolution de prix
-    df_evolution = generate_price_evolution_data()
-    
-    fig_evolution = px.line(
-        df_evolution, 
-        x="date", 
-        y="price",
-        labels={"date": "Date", "price": "Prix moyen au m²"},
-        title="Évolution du prix moyen au m²",
-        color_discrete_sequence=["#3498db"]
-    )
-    
+    """Affiche l'onglet d'analyse avec les données DV3F."""
     return dbc.Container([
-        # Tendances des prix
         dbc.Row([
             dbc.Col([
                 dbc.Card([
-                    dbc.CardHeader("Évolution des prix par m²"),
+                    dbc.CardHeader("Analyse DV3F"),
                     dbc.CardBody([
-                        # Graphique de tendance avec données correctement formatées
-                        dcc.Graph(
-                            figure=fig_evolution,
-                            style={"height": "400px"}
-                        )
+                        dbc.Row([
+                            dbc.Col([
+                                html.Label("Code INSEE"),
+                                dbc.Input(id="dv3f-code-insee", type="text", placeholder="Ex: 35238")
+                            ], width=4),
+                            dbc.Col([
+                                html.Label("Type de bien"),
+                                dcc.Dropdown(
+                                    id="dv3f-type-bien",
+                                    options=[
+                                        {"label": "Tous", "value": ""},
+                                        {"label": "Maison", "value": "Maison"},
+                                        {"label": "Appartement", "value": "Appartement"}
+                                    ],
+                                    value=""
+                                )
+                            ], width=4),
+                            dbc.Col([
+                                html.Br(),
+                                dbc.Button("Analyser", id="dv3f-analyze-button", color="primary")
+                            ], width=4)
+                        ])
                     ])
                 ])
-            ], width=8),
-            dbc.Col([
-                dbc.Card([
-                    dbc.CardHeader("Sélectionner une zone"),
-                    dbc.CardBody([
-                        html.Label("Code postal"),
-                        dbc.Input(id="analysis-postal-code", type="text", placeholder="Ex: 75011", className="mb-3"),
-                        html.Label("Type de bien"),
-                        dcc.Dropdown(
-                            id="analysis-property-type",
-                            options=[
-                                {"label": "Tous", "value": ""},
-                                {"label": "Appartement", "value": "Appartement"},
-                                {"label": "Maison", "value": "Maison"},
-                                {"label": "Studio", "value": "Studio"},
-                            ],
-                            value="",
-                            clearable=False,
-                            className="mb-3"
-                        ),
-                        dbc.Button("Mettre à jour", id="analysis-update-button", color="primary", className="w-100")
-                    ])
-                ])
-            ], width=4),
+            ])
         ], className="mb-4"),
         
-        # Analyses supplémentaires
         dbc.Row([
             dbc.Col([
                 dbc.Card([
-                    dbc.CardHeader("Comparaison par type de bien"),
+                    dbc.CardHeader("Évolution des prix médians"),
                     dbc.CardBody([
-                        # Graphique à barres factice
-                        dcc.Graph(
-                            figure=px.bar(
-                                x=["Studio", "2 pièces", "3 pièces", "4 pièces", "5+ pièces"],
-                                y=[7000, 6500, 6000, 5500, 5000],
-                                labels={"x": "Type de bien", "y": "Prix moyen au m²"},
-                                title="Prix moyen au m² par type de bien",
-                                color_discrete_sequence=["#e74c3c"]
-                            ),
-                            style={"height": "350px"}
-                        )
+                        dcc.Graph(id="dv3f-evolution-graph")
                     ])
                 ])
             ], width=6),
             dbc.Col([
                 dbc.Card([
-                    dbc.CardHeader("Répartition des biens par DPE"),
+                    dbc.CardHeader("Carte des mutations récentes"),
                     dbc.CardBody([
-                        # Graphique en camembert factice
-                        dcc.Graph(
-                            figure=px.pie(
-                                names=["A", "B", "C", "D", "E", "F", "G"],
-                                values=[5, 10, 25, 30, 15, 10, 5],
-                                title="Répartition des biens par étiquette DPE",
-                                color_discrete_sequence=px.colors.sequential.Viridis
-                            ),
-                            style={"height": "350px"}
-                        )
+                        dcc.Graph(id="dv3f-mutations-map")
                     ])
                 ])
-            ], width=6),
+            ], width=6)
+        ], className="mb-4"),
+        
+        dbc.Row([
+            dbc.Col([
+                dbc.Card([
+                    dbc.CardHeader("Statistiques DV3F"),
+                    dbc.CardBody([
+                        html.Div(id="dv3f-stats")
+                    ])
+                ])
+            ])
         ])
     ])
 
@@ -610,6 +720,93 @@ def render_prediction():
         ])
     ])
 
+def render_dv3f():
+    """Affiche l'onglet des données DV3F"""
+    return dbc.Container([
+        dbc.Row([
+            dbc.Col([
+                dbc.Card([
+                    dbc.CardHeader("Analyse DV3F"),
+                    dbc.CardBody([
+                        dbc.Row([
+                            dbc.Col([
+                                html.Label("Code INSEE *"),
+                                dbc.Input(
+                                    id="dv3f-code-insee",
+                                    type="text",
+                                    placeholder="Ex: 35238",
+                                    className="mb-2"
+                                ),
+                                html.Small(
+                                    "Code INSEE de la commune (ex: 35238 pour Rennes)",
+                                    className="text-muted"
+                                )
+                            ], width=4),
+                            dbc.Col([
+                                html.Label("Type de bien"),
+                                dcc.Dropdown(
+                                    id="dv3f-type-bien",
+                                    options=[
+                                        {"label": "Tous", "value": ""},
+                                        {"label": "Maison", "value": "Maison"},
+                                        {"label": "Appartement", "value": "Appartement"}
+                                    ],
+                                    value="",
+                                    className="mb-2"
+                                )
+                            ], width=4),
+                            dbc.Col([
+                                html.Br(),
+                                dbc.Button(
+                                    "Analyser",
+                                    id="dv3f-analyze-button",
+                                    color="primary",
+                                    className="w-100"
+                                )
+                            ], width=4)
+                        ])
+                    ])
+                ])
+            ])
+        ], className="mb-4"),
+        
+        dbc.Row([
+            dbc.Col([
+                dbc.Card([
+                    dbc.CardHeader("Évolution des prix médians"),
+                    dbc.CardBody([
+                        dcc.Graph(
+                            id="dv3f-evolution-graph",
+                            config={'displayModeBar': True}
+                        )
+                    ])
+                ])
+            ], width=6),
+            dbc.Col([
+                dbc.Card([
+                    dbc.CardHeader("Carte des mutations récentes"),
+                    dbc.CardBody([
+                        dcc.Graph(
+                            id="dv3f-mutations-map",
+                            config={'displayModeBar': True}
+                        )
+                    ])
+                ])
+            ], width=6)
+        ], className="mb-4"),
+        
+        dbc.Row([
+            dbc.Col([
+                dbc.Card([
+                    dbc.CardHeader("Statistiques DV3F"),
+                    dbc.CardBody([
+                        html.Div(id="dv3f-stats")
+                    ])
+                ])
+            ])
+        ])
+    ])
+
 # Callback pour la recherche de propriétés
 @app.callback(
     Output("search-results", "children"),
@@ -667,65 +864,6 @@ def update_search_results(n_clicks, postal_code, property_type, min_surface, min
     return dbc.Row([
         dbc.Col([dcc.Graph(figure=map_figure)], width=6),
         dbc.Col([html.H5(f"{len(properties)} résultats trouvés", className="mb-3"), html.Div(property_cards)], width=6)
-    ])
-    # Récupérer les propriétés filtrées de l'API
-    properties = get_properties(filters)
-    
-    if not properties:
-        # Si l'API ne retourne pas de résultats, affichons des données de démonstration
-        # En production, il faudrait afficher un message d'absence de résultats
-        properties = [
-            {
-                "reference": "DEMO001",
-                "type_habitation": "Appartement",
-                "nb_pieces": 3,
-                "surface": 75,
-                "prix": "320 000 €",
-                "code_postal": "75011"
-            },
-            {
-                "reference": "DEMO002",
-                "type_habitation": "Maison",
-                "nb_pieces": 5,
-                "surface": 120,
-                "prix": "450 000 €",
-                "code_postal": "69003"
-            }
-        ]
-    
-    # Créer une liste de cartes de propriétés
-    property_cards = []
-    for prop in properties[:10]:  # Limité à 10 pour l'affichage
-        price = prop.get("prix", "N/A")
-        surface = prop.get("surface", "N/A")
-        rooms = prop.get("nb_pieces", "N/A")
-        property_type = prop.get("type_habitation", "Bien immobilier")
-        postal_code = prop.get("code_postal", "N/A")
-        reference = prop.get("reference", "")
-        
-        property_cards.append(
-            dbc.Card([
-                dbc.Row([
-                    dbc.Col([
-                        # Ce pourrait être une image réelle du bien
-                        html.Div(className="property-image bg-light", style={"height": "150px", "background": "#eee"})
-                    ], width=4),
-                    dbc.Col([
-                        dbc.CardBody([
-                            html.H5(f"{property_type} - {rooms} pièces - {surface} m²"),
-                            html.H4(price, className="text-primary"),
-                            html.P(f"Code postal: {postal_code}"),
-                            html.P(f"Réf: {reference}", className="text-muted"),
-                            dbc.Button("Voir détails", color="info", size="sm")
-                        ])
-                    ], width=8)
-                ], className="g-0")
-            ], className="mb-3")
-        )
-    
-    return html.Div([
-        html.H5(f"{len(properties)} résultats trouvés", className="mb-3"),
-        html.Div(property_cards)
     ])
 
 # Callback pour la prédiction de prix
@@ -825,6 +963,147 @@ def update_price_prediction(n_clicks, property_type, postal_code, surface, rooms
     ])
     
     return {"display": "none"}, result
+
+# Mise à jour du callback DV3F
+@app.callback(
+    [
+        Output("dv3f-evolution-graph", "figure"),
+        Output("dv3f-mutations-map", "figure"),
+        Output("dv3f-stats", "children")
+    ],
+    [Input("dv3f-analyze-button", "n_clicks")],
+    [State("dv3f-code-insee", "value"),
+     State("dv3f-type-bien", "value")],
+    prevent_initial_call=True
+)
+def update_dv3f_analysis(n_clicks, code_insee, type_bien):
+    """Met à jour les graphiques et statistiques DV3F."""
+    if not n_clicks or not code_insee:
+        empty_fig = go.Figure()
+        empty_fig.update_layout(
+            title="Aucune donnée à afficher",
+            xaxis={"visible": False},
+            yaxis={"visible": False},
+            annotations=[{
+                "text": "Veuillez saisir un code INSEE et cliquer sur Analyser",
+                "xref": "paper",
+                "yref": "paper",
+                "showarrow": False,
+                "font": {"size": 20}
+            }]
+        )
+        return empty_fig, empty_fig, "Veuillez saisir un code INSEE"
+    
+    # Récupération des données d'évolution
+    evolution_data = get_dv3f_evolution(code_insee, type_bien)
+    if evolution_data:
+        df_evolution = pd.DataFrame(evolution_data)
+        fig_evolution = px.line(
+            df_evolution,
+            x="annee",
+            y=["prix_median", "prix_m2_median"],
+            title="Évolution des prix",
+            labels={
+                "value": "Prix (€)", 
+                "annee": "Année",
+                "variable": "Indicateur",
+                "prix_median": "Prix médian",
+                "prix_m2_median": "Prix/m²"
+            }
+        )
+        fig_evolution.update_layout(
+            legend_title_text="Indicateur",
+            hovermode="x unified"
+        )
+    else:
+        fig_evolution = go.Figure()
+        fig_evolution.update_layout(
+            title="Aucune donnée d'évolution disponible",
+            annotations=[{
+                "text": "Données non disponibles pour ce code INSEE",
+                "xref": "paper",
+                "yref": "paper",
+                "showarrow": False,
+                "font": {"size": 20}
+            }]
+        )
+    
+    # Récupération des mutations récentes
+    mutations_data = get_dv3f_mutations(code_insee=code_insee)
+    if mutations_data:
+        fig_mutations = create_map_mutations(mutations_data)
+    else:
+        fig_mutations = go.Figure()
+        fig_mutations.update_layout(
+            title="Aucune mutation disponible",
+            annotations=[{
+                "text": "Pas de mutations récentes pour ce code INSEE",
+                "xref": "paper",
+                "yref": "paper",
+                "showarrow": False,
+                "font": {"size": 20}
+            }]
+        )
+    
+    # Statistiques
+    stats_data = get_dv3f_data(code_insee, type_bien)
+    if stats_data:
+        try:
+            stats = pd.DataFrame(stats_data).iloc[-1]  # Dernière année
+            stats_display = html.Div([
+                html.H4(f"Statistiques pour {stats['nom_commune']} ({stats['annee']})", className="mb-4"),
+                dbc.Row([
+                    dbc.Col([
+                        dbc.Card([
+                            dbc.CardBody([
+                                html.H5("Maisons individuelles", className="card-title"),
+                                html.P([
+                                    html.Strong("Nombre de transactions: "),
+                                    f"{stats['nbtrans_cod111'] or 0:,}".replace(",", " ")
+                                ]),
+                                html.P([
+                                    html.Strong("Prix médian: "),
+                                    f"{stats['prix_median_cod111'] or 0:,.0f}€".replace(",", " ")
+                                ]),
+                                html.P([
+                                    html.Strong("Prix/m² médian: "),
+                                    f"{stats['prix_m2_median_cod111'] or 0:,.0f}€/m²".replace(",", " ")
+                                ])
+                            ])
+                        ])
+                    ], width=6),
+                    dbc.Col([
+                        dbc.Card([
+                            dbc.CardBody([
+                                html.H5("Appartements", className="card-title"),
+                                html.P([
+                                    html.Strong("Nombre de transactions: "),
+                                    f"{stats['nbtrans_cod121'] or 0:,}".replace(",", " ")
+                                ]),
+                                html.P([
+                                    html.Strong("Prix médian: "),
+                                    f"{stats['prix_median_cod121'] or 0:,.0f}€".replace(",", " ")
+                                ]),
+                                html.P([
+                                    html.Strong("Prix/m² médian: "),
+                                    f"{stats['prix_m2_median_cod121'] or 0:,.0f}€/m²".replace(",", " ")
+                                ])
+                            ])
+                        ])
+                    ], width=6)
+                ])
+            ])
+        except Exception as e:
+            print(f"Erreur lors du traitement des statistiques: {e}")
+            stats_display = html.Div([
+                html.P("Erreur lors du traitement des statistiques", className="text-danger")
+            ])
+    else:
+        stats_display = html.Div([
+            html.P("Aucune donnée statistique disponible pour ce code INSEE", className="text-muted")
+        ])
+    
+    return fig_evolution, fig_mutations, stats_display
 
 # Lancer l'application
 if __name__ == "__main__":
